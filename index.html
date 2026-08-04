@@ -447,15 +447,62 @@ $('btnExport').addEventListener('click', () => {
 function exportImage(cv, size, format) {
   let src = cv;
   if (size && (cv.width !== size || cv.height !== size)) {
-    const t = makeCanvas(size, size);
-    t.getContext('2d').drawImage(cv, 0, 0, size, size);
-    src = t;
+    src = highQualityResize(cv, size, size);
   }
   const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
   const dataUrl = src.toDataURL(mime, 0.95).split(',')[1];
   const bin = atob(dataUrl); const arr = new Uint8Array(bin.length);
   for (let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
   return arr;
+}
+
+// 高质量放大：分步 2x + Lanczos + 每步锐化
+function highQualityResize(src, tw, th) {
+  let cur = src;
+  let cw = cur.width, ch = cur.height;
+  // 分步放大（每步最多 2x），避免一步拉到巨图
+  while (cw < tw || ch < th) {
+    const nw = Math.min(tw, cw * 2);
+    const nh = Math.min(th, ch * 2);
+    const step = makeCanvas(nw, nh);
+    const ctx = step.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';   // Lanczos 高质量插值
+    ctx.drawImage(cur, 0, 0, nw, nh);
+    cur = sharpenUSM(step, 0.8);           // 每步锐化恢复边缘
+    cw = nw; ch = nh;
+  }
+  // 最终精确尺寸
+  if (cur.width !== tw || cur.height !== th) {
+    const final = makeCanvas(tw, th);
+    const ctx = final.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(cur, 0, 0, tw, th);
+    cur = sharpenUSM(final, 0.6);
+  }
+  return cur;
+}
+
+// Unsharp Mask 锐化（保留细节）
+function sharpenUSM(canvas, amount) {
+  const w = canvas.width, h = canvas.height;
+  const ctx = canvas.getContext('2d');
+  const data = ctx.getImageData(0,0,w,h);
+  const src = new Float32Array(data.data.length);
+  for (let i=0;i<src.length;i++) src[i] = data.data[i];
+  const a = Math.max(0.5, amount * 2);
+  for (let y=1;y<h-1;y++) for (let x=1;x<w-1;x++) {
+    for (let c=0;c<3;c++) {
+      const i=(y*w+x)*4+c;
+      const center = src[i];
+      const blur = (src[i-4]+src[i+4]+src[i-w*4]+src[i+w*4] + center*4) / 8;
+      const sharp = center + (center - blur) * a;
+      data.data[i] = Math.max(0, Math.min(255, sharp));
+    }
+  }
+  ctx.putImageData(data,0,0);
+  return canvas;
 }
 
 // ============ Three.js 3D 预览 ============
