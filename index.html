@@ -448,6 +448,9 @@ function exportImage(cv, size, format) {
   let src = cv;
   if (size && (cv.width !== size || cv.height !== size)) {
     src = highQualityResize(cv, size, size);
+  } else {
+    // 原图导出：轻锐化提升观感
+    src = sharpenUSM(cv, 0.4);
   }
   const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
   const dataUrl = src.toDataURL(mime, 0.95).split(',')[1];
