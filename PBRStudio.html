@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PBR 贴图工坊 Pro</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:'Segoe UI',sans-serif; background:#1a1a2e; color:#eee; height:100vh; display:flex; flex-direction:column; }
+header { background:#16213e; padding:12px 20px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid #0f3460; }
+header h1 { font-size:20px; color:#e94560; }
+header span { font-size:13px; color:#888; }
+main { flex:1; display:flex; overflow:hidden; }
+#left { width:280px; background:#16213e; padding:16px; overflow-y:auto; border-right:1px solid #0f3460; }
+#center { flex:1; display:flex; flex-direction:column; padding:10px; }
+#right { width:360px; background:#16213e; padding:10px; border-left:1px solid #0f3460; display:flex; flex-direction:column; }
+.drop-zone { border:2px dashed #0f3460; border-radius:12px; padding:30px 20px; text-align:center; cursor:pointer; transition:0.3s; }
+.drop-zone:hover, .drop-zone.drag { border-color:#e94560; background:#1a1a3e; }
+.drop-zone input { display:none; }
+.slider-group { margin-top:16px; }
+.slider-group label { display:flex; justify-content:space-between; font-size:13px; margin-bottom:4px; color:#aaa; }
+.slider-group input[type=range] { width:100%; accent-color:#e94560; }
+.btn { width:100%; padding:10px; margin-top:10px; border:none; border-radius:8px; background:#0f3460; color:#eee; cursor:pointer; font-size:14px; transition:0.2s; }
+.btn:hover { background:#e94560; }
+.btn:disabled { opacity:0.4; cursor:not-allowed; }
+.map-tabs { display:flex; gap:4px; flex-wrap:wrap; margin-bottom:8px; }
+.map-tab { padding:5px 10px; border-radius:6px; background:#0f3460; cursor:pointer; font-size:12px; }
+.map-tab.active { background:#e94560; }
+#preview { flex:1; border-radius:8px; background:#111; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+#preview canvas { max-width:100%; max-height:100%; }
+#viewer3d { flex:1; border-radius:8px; overflow:hidden; background:#111; }
+.viewer-tools { display:flex; gap:6px; margin-bottom:8px; flex-wrap:wrap; }
+.viewer-tools button { flex:1; padding:6px; font-size:12px; background:#0f3460; color:#eee; border:none; border-radius:6px; cursor:pointer; }
+.viewer-tools button:hover { background:#e94560; }
+.hint { font-size:12px; color:#666; text-align:center; padding:10px; }
+#status { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#0f3460; padding:10px 24px; border-radius:8px; display:none; z-index:100; font-size:14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PBR 贴图工坊 Pro</h1>
+  <span>一张照片 → 全套 PBR · 无缝 · 3D 预览 · ZIP 导出</span>
+</header>
+
+<main>
+  <!-- 左：上传+参数 -->
+  <div id="left">
+    <div class="drop-zone" id="dropZone">
+      <div style="font-size:40px;margin-bottom:8px">📷</div>
+      <div>拖入照片 或 点击上传</div>
+      <div style="font-size:11px;color:#666;margin-top:6px">支持 JPG / PNG / WEBP</div>
+      <input type="file" id="fileInput" accept="image/*">
+    </div>
+
+    <div class="slider-group">
+      <label><span>无缝强度</span><span id="vSeamless">80</span></label>
+      <input type="range" id="slSeamless" min="0" max="100" value="80">
+    </div>
+    <div class="slider-group">
+      <label><span>法线强度</span><span id="vNormal">100</span></label>
+      <input type="range" id="slNormal" min="0" max="200" value="100">
+    </div>
+    <div class="slider-group">
+      <label><span>粗糙度对比</span><span id="vRough">100</span></label>
+      <input type="range" id="slRough" min="0" max="200" value="100">
+    </div>
+    <div class="slider-group">
+      <label><span>AO 强度</span><span id="vAO">100</span></label>
+      <input type="range" id="slAO" min="0" max="200" value="100">
+    </div>
+    <div class="slider-group">
+      <label><span>金属度</span><span id="vMetal">0</span></label>
+      <input type="range" id="slMetal" min="0" max="100" value="0">
+    </div>
+
+    <button class="btn" id="btnGen" disabled>🛠️ 生成全套 PBR</button>
+    <button class="btn" id="btnExport" disabled>📦 导出 ZIP</button>
+  </div>
+
+  <!-- 中：贴图预览 -->
+  <div id="center">
+    <div class="map-tabs" id="mapTabs"></div>
+    <div id="preview"><div class="hint">上传照片开始</div></div>
+  </div>
+
+  <!-- 右：3D 预览 -->
+  <div id="right">
+    <div class="viewer-tools">
+      <button id="btnSphere">球体</button>
+      <button id="btnPlane">平面</button>
+      <button id="btnRotate">旋转</button>
+      <button id="btnHdri">换环境</button>
+      <button id="btnTile">平铺对比</button>
+    </div>
+    <div id="viewer3d"></div>
+    <div class="hint">拖拽旋转视角 · 滚轮缩放</div>
+  </div>
+</main>
+
+<div id="status"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script>
+// ============ 状态 ============
+const state = {
+  srcImage: null,       // 原图 Image
+  maps: {},             // 生成的贴图 {basecolor, normal, roughness, ao, height, metallic}
+  mapNames: [],         // 贴图顺序
+  currentMap: 'basecolor',
+  seamless: 80, normalStr: 100, roughStr: 100, aoStr: 100, metalVal: 0
+};
+
+// ============ DOM ============
+const $ = id => document.getElementById(id);
+const dropZone = $('dropZone'), fileInput = $('fileInput');
+
+// ============ 上传 ============
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('drag');
+  const f = e.dataTransfer.files[0]; if (f && f.type.startsWith('image/')) loadImage(f);
+});
+fileInput.addEventListener('change', e => { if (e.target.files[0]) loadImage(e.target.files[0]); });
+
+function loadImage(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => { state.srcImage = img; setupTabs(); $('btnGen').disabled = false; showStatus('照片已加载，点击生成'); };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+// ============ 滑块 ============
+let debounceTimer;
+function bindSlider(id, key, vid) {
+  $(id).addEventListener('input', () => {
+    state[key] = +$(id).value; $(vid).textContent = $(id).value;
+    if (state.srcImage) {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => regenerate(), 200);  // 防抖 200ms 实时预览
+    }
+  });
+}
+bindSlider('slSeamless','seamless','vSeamless');
+bindSlider('slNormal','normalStr','vNormal');
+bindSlider('slRough','roughStr','vRough');
+bindSlider('slAO','aoStr','vAO');
+bindSlider('slMetal','metalVal','vMetal');
+
+// ============ 贴图 Tab ============
+function setupTabs() {
+  state.mapNames = ['原图','basecolor','normal','roughness','ao','height','metallic'];
+  const names = { '原图':'原图', basecolor:'BaseColor', normal:'法线', roughness:'粗糙度', ao:'AO', height:'高度', metallic:'金属度' };
+  $('mapTabs').innerHTML = '';
+  state.mapNames.forEach(m => {
+    const t = document.createElement('div');
+    t.className = 'map-tab' + (m === state.currentMap ? ' active' : '');
+    t.textContent = names[m] || m;
+    t.onclick = () => { state.currentMap = m; updateTabUI(); showMap(m); };
+    $('mapTabs').appendChild(t);
+  });
+  $('preview').innerHTML = '<canvas id="pvCanvas"></canvas>';
+  showMap('原图');
+}
+function updateTabUI() {
+  [...$('mapTabs').children].forEach(c => c.classList.remove('active'));
+  const idx = state.mapNames.indexOf(state.currentMap);
+  if (idx >= 0) $('mapTabs').children[idx].classList.add('active');
+}
+function showMap(name) {
+  const cv = $('pvCanvas'); if (!cv) return;
+  const ctx = cv.getContext('2d');
+  if (name === '原图') {
+    cv.width = state.srcImage.width; cv.height = state.srcImage.height;
+    ctx.drawImage(state.srcImage, 0, 0);
+  } else if (state.maps[name]) {
+    cv.width = state.maps[name].width; cv.height = state.maps[name].height;
+    ctx.drawImage(state.maps[name], 0, 0);
+  }
+}
+
+// ============ 核心：图像处理 ============
+function makeCanvas(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+// 转灰度
+function toGray(img) {
+  const cv = makeCanvas(img.width, img.height);
+  const ctx = cv.getContext('2d'); ctx.drawImage(img, 0, 0);
+  const d = ctx.getImageData(0,0,img.width,img.height);
+  const g = new Float32Array(img.width*img.height);
+  for (let i=0;i<g.length;i++) g[i] = d.data[i*4]*0.299 + d.data[i*4+1]*0.587 + d.data[i*4+2]*0.114;
+  return { cv, gray: g, data: d, w: img.width, h: img.height };
+}
+
+// 四方连续无缝：四副本偏移混合（标准 tileable 算法）
+function seamless(img, strength) {
+  const w = img.width, h = img.height;
+  const out = makeCanvas(w,h), octx = out.getContext('2d');
+  octx.drawImage(img, 0, 0);
+  const d0 = octx.getImageData(0,0,w,h);           // 原图
+  const src = octx.getImageData(0,0,w,h);           // 采样源
+  const dst = octx.createImageData(w,h);
+  const halfW = Math.floor(w/2), halfH = Math.floor(h/2);
+  // 边缘混合宽度（占图宽 12%，可随强度调）
+  const bw = Math.max(2, Math.floor(Math.min(w,h) * 0.12 * (0.5 + strength/200)));
+  const strengthF = strength/100;
+  for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
+    const i = (y*w+x)*4;
+    // 四个采样点（偏移半幅，循环取模）
+    const sx0 = x, sy0 = y;
+    const sx1 = (x+halfW)%w, sy1 = y;               // 水平偏移
+    const sx2 = x, sy2 = (y+halfH)%h;               // 垂直偏移
+    const sx3 = (x+halfW)%w, sy3 = (y+halfH)%h;     // 双偏移
+    const i0=(sy0*w+sx0)*4, i1=(sy1*w+sx1)*4, i2=(sy2*w+sx2)*4, i3=(sy3*w+sx3)*4;
+    // 到四边的距离 → 边缘权重
+    const dx = Math.min(x, w-1-x), dy = Math.min(y, h-1-y);
+    let wx = 1, wy = 1;
+    if (dx < bw) wx = Math.max(0, dx/bw);   // 靠近左右边 → 水平混合权重小
+    if (dy < bw) wy = Math.max(0, dy/bw);   // 靠近上下边 → 垂直混合权重小
+    wx = wx*strengthF + (1-strengthF);       // 强度插值（100% 全混合，0% 保持原图）
+    wy = wy*strengthF + (1-strengthF);
+    const w00 = (1-wx)*(1-wy);               // 原图权重（中心最大）
+    const w10 = wx*(1-wy);                   // 水平偏移权重（左右边最大）
+    const w01 = (1-wx)*wy;                   // 垂直偏移权重（上下边最大）
+    const w11 = wx*wy;                       // 双偏移权重（四角最大）
+    const sw = w00+w10+w01+w11;
+    const r = (src.data[i0]*w00 + src.data[i1]*w10 + src.data[i2]*w01 + src.data[i3]*w11)/sw;
+    const g = (src.data[i0+1]*w00 + src.data[i1+1]*w10 + src.data[i2+1]*w01 + src.data[i3+1]*w11)/sw;
+    const b = (src.data[i0+2]*w00 + src.data[i1+2]*w10 + src.data[i2+2]*w01 + src.data[i3+2]*w11)/sw;
+    dst.data[i]=r; dst.data[i+1]=g; dst.data[i+2]=b; dst.data[i+3]=255;
+  }
+  octx.putImageData(dst,0,0);
+  return out;
+}
+
+// Sobel 法线
+function genNormal(g, w, h, strength) {
+  const out = makeCanvas(w,h), ctx = out.getContext('2d');
+  const img = ctx.createImageData(w,h);
+  const s = strength/100 * 2;
+  for (let y=1;y<h-1;y++) for (let x=1;x<w-1;x++) {
+    const i = y*w+x;
+    const tl=g[i-w-1],t=g[i-w],tr=g[i-w+1],l=g[i-1],r=g[i+1],bl=g[i+w-1],b=g[i+w],br=g[i+w+1];
+    const gx = (tr+2*r+br) - (tl+2*l+bl);
+    const gy = (bl+2*b+br) - (tl+2*t+tr);
+    const nx = -gx*s, ny = -gy*s, nz = 255;
+    const len = Math.sqrt(nx*nx+ny*ny+nz*nz) || 1;
+    const o = i*4;
+    img.data[o]   = ((nx/len)*0.5+0.5)*255;
+    img.data[o+1] = ((ny/len)*0.5+0.5)*255;
+    img.data[o+2] = (nz/len)*255;
+    img.data[o+3] = 255;
+  }
+  ctx.putImageData(img,0,0);
+  return out;
+}
+
+// 高度（灰度）
+function genHeight(g, w, h) {
+  const out = makeCanvas(w,h), ctx = out.getContext('2d');
+  const img = ctx.createImageData(w,h);
+  for (let i=0;i<g.length;i++) {
+    const v = g[i];
+    img.data[i*4]=v; img.data[i*4+1]=v; img.data[i*4+2]=v; img.data[i*4+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+  return out;
+}
+
+// AO：高度局部均值 → 凹陷暗
+function genAO(g, w, h, strength) {
+  const out = makeCanvas(w,h), ctx = out.getContext('2d');
+  const img = ctx.createImageData(w,h);
+  const R = 4, s = strength/100;
+  for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
+    let sum=0, cnt=0;
+    for (let dy=-R;dy<=R;dy++) for (let dx=-R;dx<=R;dx++) {
+      const nx=(x+dx+w)%w, ny=(y+dy+h)%h;
+      sum += g[ny*w+nx]; cnt++;
+    }
+    const avg = sum/cnt;
+    const v = Math.max(0, Math.min(255, avg + (g[y*w+x]-avg)*s*0.6));
+    const o=(y*w+x)*4;
+    img.data[o]=v; img.data[o+1]=v; img.data[o+2]=v; img.data[o+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+  return out;
+}
+
+// 粗糙度：局部标准差
+function genRoughness(g, w, h, strength) {
+  const out = makeCanvas(w,h), ctx = out.getContext('2d');
+  const img = ctx.createImageData(w,h);
+  const R = 2, s = strength/100;
+  // 归一化亮度用于反向（暗=粗糙）
+  let mn=255,mx=0; for(let i=0;i<g.length;i++){mn=Math.min(mn,g[i]);mx=Math.max(mx,g[i]);}
+  const range = (mx-mn)||1;
+  for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
+    let sum=0, sum2=0, cnt=0;
+    for (let dy=-R;dy<=R;dy++) for (let dx=-R;dx<=R;dx++) {
+      const nx=(x+dx+w)%w, ny=(y+dy+h)%h, v=g[ny*w+nx];
+      sum+=v; sum2+=v*v; cnt++;
+    }
+    const mean=sum/cnt;
+    const std=Math.sqrt(Math.max(0,sum2/cnt-mean*mean));
+    const bright=(g[y*w+x]-mn)/range;
+    const v=Math.max(0,Math.min(255, (std*3 + (1-bright)*40) * s));
+    const o=(y*w+x)*4;
+    img.data[o]=v; img.data[o+1]=v; img.data[o+2]=v; img.data[o+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+  return out;
+}
+
+// 金属度（均匀值）
+function genMetallic(w,h,val) {
+  const out = makeCanvas(w,h), ctx = out.getContext('2d');
+  ctx.fillStyle = `rgb(${val},${val},${val})`; ctx.fillRect(0,0,w,h);
+  return out;
+}
+
+// ============ 生成 ============
+function regenerate() {
+  const img = state.srcImage; if (!img) return;
+  const W=img.width, H=img.height;
+  const { gray, cv } = toGray(img);
+  const seamlessImg = seamless(img, state.seamless);
+  state.maps['basecolor'] = seamlessImg;
+  const sGray = toGray(seamlessImg).gray;
+  state.maps['normal'] = genNormal(sGray, W, H, state.normalStr);
+  state.maps['height'] = genHeight(sGray, W, H);
+  state.maps['ao'] = genAO(sGray, W, H, state.aoStr);
+  state.maps['roughness'] = genRoughness(sGray, W, H, state.roughStr);
+  state.maps['metallic'] = genMetallic(W, H, Math.round(state.metalVal*255/100));
+  $('btnExport').disabled = false;
+  if (renderer) { buildMesh(); } else { initViewer(); }
+  showMap(state.currentMap);
+}
+$('btnGen').addEventListener('click', () => {
+  if (!state.srcImage) return;
+  showStatus('正在生成 PBR...');
+  setTimeout(() => { regenerate(); showStatus('✅ 全套 PBR 已生成'); }, 50);
+});
+
+// ============ 导出 ZIP ============
+$('btnExport').addEventListener('click', () => {
+  const zip = new JSZip();
+  const n = 'texture';
+  const names = { basecolor:'BaseColor', normal:'Normal', roughness:'Roughness', ao:'AO', height:'Height', metallic:'Metallic' };
+  state.mapNames.forEach(m => { if (state.maps[m]) zip.file(`${n}_${names[m]||m}.png`, canvasToBlob(state.maps[m])); });
+  zip.generateAsync({type:'blob'}).then(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'PBR_Material.zip';
+    a.click();
+    showStatus('✅ ZIP 已导出');
+  });
+});
+function canvasToBlob(cv) {
+  const data = cv.toDataURL('image/png').split(',')[1];
+  const bin = atob(data); const arr = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+  return arr;
+}
+
+// ============ Three.js 3D 预览 ============
+let renderer, scene, camera, mesh, controls, currentGeo='sphere', envIdx=0, autoRotate=false, tileMode=false;
+const envColors = [0xffffff, 0xffd9a0, 0xa0d9ff, 0xffa0c0];
+function initViewer() {
+  if (!renderer) {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+    camera.position.set(0, 0, 3.2);
+    renderer = new THREE.WebGLRenderer({ antialias:true });
+    renderer.setSize(340, 300);
+    $('viewer3d').appendChild(renderer.domElement);
+    const amb = new THREE.AmbientLight(0xffffff, 0.45);
+    const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+    dir.position.set(2,3,2);
+    scene.add(amb); scene.add(dir);
+    // 拖拽旋转
+    let dragging=false, px=0, py=0;
+    renderer.domElement.addEventListener('mousedown', e=>{dragging=true;px=e.clientX;py=e.clientY;});
+    window.addEventListener('mouseup', ()=>dragging=false);
+    window.addEventListener('mousemove', e=>{
+      if(!dragging) return;
+      mesh.rotation.y += (e.clientX-px)*0.01;
+      mesh.rotation.x += (e.clientY-py)*0.01;
+      px=e.clientX; py=e.clientY;
+    });
+    renderer.domElement.addEventListener('wheel', e=>{
+      camera.position.z = Math.max(1.5, Math.min(8, camera.position.z + e.deltaY*0.005));
+    });
+    // 空格键切换平铺
+    window.addEventListener('keydown', e=>{ if(e.code==='Space'){ e.preventDefault(); toggleTile(); } });
+    animate();
+  }
+  buildMesh();
+}
+function toggleTile() {
+  tileMode = !tileMode;
+  buildMesh();
+  showStatus(tileMode ? '🔁 平铺 3x3（检查接缝）' : '🔒 单次显示');
+}
+function buildMesh() {
+  if (mesh) { scene.remove(mesh); }
+  const tex = new THREE.Texture(state.maps['basecolor']);
+  tex.wrapS = tex.wrapT = tileMode ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+  tex.repeat.set(tileMode ? 3 : 1, tileMode ? 3 : 1);
+  tex.needsUpdate = true;
+  const mat = new THREE.MeshStandardMaterial({ map:tex, roughness:0.7, metalness:0.1 });
+  const geo = currentGeo==='sphere' ? new THREE.SphereGeometry(1.3, 64, 64) : new THREE.PlaneGeometry(2.6,2.6, 1,1);
+  mesh = new THREE.Mesh(geo, mat);
+  scene.add(mesh);
+  applyEnv();
+}
+function applyEnv() {
+  if (!mesh) return;
+  const c = envColors[envIdx % envColors.length];
+  scene.background = new THREE.Color(c);
+  mesh.material.color.set(c);
+}
+function animate() {
+  requestAnimationFrame(animate);
+  if (autoRotate && mesh) mesh.rotation.y += 0.01;
+  renderer.render(scene, camera);
+}
+$('btnSphere').onclick = ()=>{ currentGeo='sphere'; buildMesh(); };
+$('btnPlane').onclick = ()=>{ currentGeo='plane'; buildMesh(); };
+$('btnRotate').onclick = ()=>{ autoRotate=!autoRotate; };
+$('btnHdri').onclick = ()=>{ envIdx++; applyEnv(); };
+$('btnTile').onclick = toggleTile;
+
+// ============ 状态提示 ============
+let statusTimer;
+function showStatus(msg) {
+  const s = $('status'); s.textContent = msg; s.style.display='block';
+  clearTimeout(statusTimer); statusTimer = setTimeout(()=> s.style.display='none', 3000);
+}
+</script>
+</body>
+</html>
