@@ -288,7 +288,7 @@ function toGray(img) {
   return { gray: g, w: img.width, h: img.height };
 }
 
-// 四方连续无缝：中心保留原图 + 边缘带偏移混合（不改变原图主体，边缘严格连续）
+// 四方连续无缝（SD tiling 原理）：偏移半幅 + 宽混合带(25%) + smoothstep平滑 + 中心保留
 function seamless(img, strength) {
   const w = img.width, h = img.height;
   const out = makeCanvas(w,h), octx = out.getContext('2d');
@@ -296,28 +296,31 @@ function seamless(img, strength) {
   const src = octx.getImageData(0,0,w,h);
   const dst = octx.createImageData(w,h);
   const halfW = Math.floor(w/2), halfH = Math.floor(h/2);
-  // 边缘混合带宽（图宽 12%）
-  const bw = Math.max(2, Math.floor(Math.min(w,h) * 0.12));
+  // SD 风格宽混合带：图宽 25%（过渡宽=无缝自然）
+  const bw = Math.max(4, Math.floor(Math.min(w,h) * 0.25));
   const s = strength/100;
+  // smoothstep：边缘0 → 中心1，平滑过渡无硬切
+  const ss = t => { const c=Math.max(0,Math.min(1,t)); return c*c*(3-2*c); };
   for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
     const i=(y*w+x)*4;
     const dx=Math.min(x,w-1-x), dy=Math.min(y,h-1-y);
-    // 中心区域：完全保留原图（主体不变）
+    // 中心区域（>带宽）：完全保留原图
     if (dx > bw && dy > bw) {
       dst.data[i]=src.data[i]; dst.data[i+1]=src.data[i+1]; dst.data[i+2]=src.data[i+2]; dst.data[i+3]=255;
       continue;
     }
-    // 边缘带：偏移混合实现左=右、上=下
-    let wx = dx <= bw ? Math.max(0,dx/bw) : 1;
-    let wy = dy <= bw ? Math.max(0,dy/bw) : 1;
-    wx = wx*s + (1-s); wy = wy*s + (1-s);
+    // 边缘带：权重平滑（0=用偏移副本，1=原图）
+    let wx = dx <= bw ? ss(dx/bw) : 1;
+    let wy = dy <= bw ? ss(dy/bw) : 1;
+    wx = 1-(1-wx)*s; wy = 1-(1-wy)*s;
+    // 四副本：原图 + 水平偏移 + 垂直偏移 + 双偏移（像素环绕连续）
     const sx1=(x+halfW)%w, sy2=(y+halfH)%h;
-    const i1=(y*w+sx1)*4, i2=(sy2*w+x)*4, i3=(sy2*w+sx1)*4;
-    const w00=(1-wx)*(1-wy), w10=wx*(1-wy), w01=(1-wx)*wy, w11=wx*wy;
+    const i0=i, i1=(y*w+sx1)*4, i2=(sy2*w+x)*4, i3=(sy2*w+sx1)*4;
+    const w00=wx*wy, w10=(1-wx)*wy, w01=wx*(1-wy), w11=(1-wx)*(1-wy);
     const sw=w00+w10+w01+w11;
-    dst.data[i]=(src.data[i]*w00+src.data[i1]*w10+src.data[i2]*w01+src.data[i3]*w11)/sw;
-    dst.data[i+1]=(src.data[i+1]*w00+src.data[i1+1]*w10+src.data[i2+1]*w01+src.data[i3+1]*w11)/sw;
-    dst.data[i+2]=(src.data[i+2]*w00+src.data[i1+2]*w10+src.data[i2+2]*w01+src.data[i3+2]*w11)/sw;
+    dst.data[i]=(src.data[i0]*w00+src.data[i1]*w10+src.data[i2]*w01+src.data[i3]*w11)/sw;
+    dst.data[i+1]=(src.data[i0+1]*w00+src.data[i1+1]*w10+src.data[i2+1]*w01+src.data[i3+1]*w11)/sw;
+    dst.data[i+2]=(src.data[i0+2]*w00+src.data[i1+2]*w10+src.data[i2+2]*w01+src.data[i3+2]*w11)/sw;
     dst.data[i+3]=255;
   }
   octx.putImageData(dst,0,0);
@@ -489,6 +492,12 @@ async function superResolve() {
       imgData.data[i+3] = 255;
     }
     octx.putImageData(imgData,0,0);
+    // 超分后增强：微对比度 + 强锐化（细节更清晰）
+    const enh = outCanvas.getContext('2d');
+    enh.filter = 'contrast(1.06)';
+    enh.drawImage(outCanvas, 0, 0);
+    enh.filter = 'none';
+    sharpenUSM(outCanvas, 1.1);
     // 更新底图 + 重新生成
     state.srcImage = outCanvas;
     setupTabs();
