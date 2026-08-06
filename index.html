@@ -77,9 +77,13 @@ select:hover, .btn:hover { background:#e94560; }
     </select>
 
     <div class="section-title">🔧 参数调整</div>
+    <div style="margin-top:8px;display:flex;align-items:center;gap:8px;background:#0f3460;padding:8px 10px;border-radius:8px;cursor:pointer" id="seamlessBox">
+      <input type="checkbox" id="chkSeamless" style="accent-color:#e94560;width:16px;height:16px">
+      <label for="chkSeamless" style="font-size:13px;color:#eee;cursor:pointer;flex:1">四方连续无缝</label>
+    </div>
     <div class="slider-group">
-      <label><span>无缝强度</span><span id="vSeamless">80</span></label>
-      <input type="range" id="slSeamless" min="0" max="100" value="80">
+      <label><span>无缝强度</span><span id="vSeamless">30</span></label>
+      <input type="range" id="slSeamless" min="0" max="100" value="30">
     </div>
     <div class="slider-group">
       <label><span>法线强度</span><span id="vNormal">100</span></label>
@@ -414,9 +418,11 @@ function genMetallic(w,h,val) {
 function regenerate() {
   const img = state.srcImage; if (!img) return;
   const W=img.width, H=img.height;
-  const seamlessImg = seamless(img, state.seamless);
-  state.maps['basecolor'] = seamlessImg;
-  const sGray = toGray(seamlessImg).gray;
+  // 只有勾选"四方连续无缝"才做无缝处理，否则直接用原图（不改图）
+  const useSeamless = $('chkSeamless') && $('chkSeamless').checked;
+  const baseImg = useSeamless ? seamless(img, state.seamless) : img;
+  state.maps['basecolor'] = baseImg;
+  const sGray = toGray(baseImg).gray;
   state.maps['normal'] = genNormal(sGray, W, H, state.normalStr);
   state.maps['height'] = genHeight(sGray, W, H);
   state.maps['ao'] = genAO(sGray, W, H, state.aoStr);
