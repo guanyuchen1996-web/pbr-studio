@@ -222,11 +222,12 @@ $('presetSelect').addEventListener('change', () => {
   if (state.srcImage) { debouncedRegen(); }
 });
 
-// ============ 滑块 ============
-let debounceTimer;
+// ============ 滑块（拖动小预览，松手全尺寸）============
+let debounceTimer, fullTimer;
 function debouncedRegen() {
-  clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => regenerate(), 200);
+  clearTimeout(fullTimer);
+  regenerate(true);                        // 立即小尺寸预览（流畅）
+  fullTimer = setTimeout(() => regenerate(false), 800);  // 停止 800ms 后全尺寸精确
 }
 function bindSlider(id, key, vid, fmt) {
   $(id).addEventListener('input', () => {
@@ -419,22 +420,33 @@ function genMetallic(w,h,val) {
   return out;
 }
 
-// ============ 生成 ============
-function regenerate() {
-  const base = state.baseImage || state.srcImage;   // 底图（默认原图，无缝后是无缝版）
+// ============ 生成（支持预览模式：小尺寸快速，松手全尺寸）============
+function regenerate(preview) {
+  const base = state.baseImage || state.srcImage;
   if (!base) return;
-  const W=base.width, H=base.height;
-  state.maps['basecolor'] = base;
-  const sGray = toGray(base).gray;
+  // 预览模式：缩小到 512px 快速计算（毫秒级，拖动流畅）
+  const scale = preview ? Math.min(1, 512/Math.max(base.width, base.height)) : 1;
+  let src = base;
+  if (scale < 1) {
+    src = makeCanvas(Math.floor(base.width*scale), Math.floor(base.height*scale));
+    const sc = src.getContext('2d'); sc.imageSmoothingEnabled=true; sc.imageSmoothingQuality='high';
+    sc.drawImage(base, 0, 0, src.width, src.height);
+  }
+  const W=src.width, H=src.height;
+  state.maps['basecolor'] = src;
+  const sGray = toGray(src).gray;
   state.maps['normal'] = genNormal(sGray, W, H, state.normalStr);
   state.maps['height'] = genHeight(sGray, W, H);
   state.maps['ao'] = genAO(sGray, W, H, state.aoStr);
   state.maps['roughness'] = genRoughness(sGray, W, H, state.roughStr);
   state.maps['metallic'] = genMetallic(W, H, Math.round(state.metalVal*255/100));
   $('btnExport').disabled = false;
-  if (renderer) { buildMesh(); } else { initViewer(); }
+  // 全尺寸模式才更新 3D（预览模式只刷贴图，快）
+  if (!preview) {
+    if (renderer) { buildMesh(); } else { initViewer(); }
+    buildMatBalls();
+  }
   showMap(state.currentMap);
-  buildMatBalls();
 }
 // 独立无缝：先生成四方连续图，作为新底图，再基于它生成 PBR
 $('btnSeamless').addEventListener('click', () => {
@@ -479,7 +491,6 @@ async function superResolve() {
   try {
     const session = await loadSRModel();
     const img = state.srcImage;
-    // 限制输入尺寸防内存爆（最大 1408，超分后 2816）
     let src = img;
     const MAX = 1408;
     if (src.width > MAX || src.height > MAX) {
@@ -490,39 +501,36 @@ async function superResolve() {
       src = t;
     }
     const w = src.width, h = src.height;
-    const cv = makeCanvas(w,h); const ctx = cv.getContext('2d'); ctx.drawImage(src,0,0);
-    const data = ctx.getImageData(0,0,w,h).data;
-    // RGB CHW 0-1
-    const input = new Float32Array(3*w*h);
-    for (let i=0;i<w*h;i++) {
-      input[i] = data[i*4]/255;
-      input[w*h+i] = data[i*4+1]/255;
-      input[2*w*h+i] = data[i*4+2]/255;
-    }
-    const feeds = {}; feeds[session.inputNames[0]] = new ort.Tensor('float32', input, [1,3,h,w]);
-    const results = await session.run(feeds);
-    const out = results[session.outputNames[0]];
     const ow = w*2, oh = h*2;
-    const outCanvas = makeCanvas(ow,oh);
+    const outCanvas = makeCanvas(ow, oh);
     const octx = outCanvas.getContext('2d');
-    const imgData = octx.createImageData(ow,oh);
-    const od = out.data;
-    for (let y=0;y<oh;y++) for (let x=0;x<ow;x++) {
-      const i = (y*ow+x)*4, si = y*ow+x;
-      imgData.data[i]   = Math.max(0,Math.min(255, od[si]*255));
-      imgData.data[i+1] = Math.max(0,Math.min(255, od[ow*oh+si]*255));
-      imgData.data[i+2] = Math.max(0,Math.min(255, od[2*ow*oh+si]*255));
-      imgData.data[i+3] = 255;
+    // 分块超分（1024 块 → 2048），避免大图慢/内存爆，带进度
+    const BLOCK = 1024;
+    const blocksX = Math.ceil(w/BLOCK), blocksY = Math.ceil(h/BLOCK);
+    const total = blocksX*blocksY; let done = 0;
+    for (let by=0; by<h; by+=BLOCK) {
+      for (let bx=0; bx<w; bx+=BLOCK) {
+        const cw = Math.min(BLOCK, w-bx), ch = Math.min(BLOCK, h-by);
+        // 切块
+        const blockCv = makeCanvas(cw,ch);
+        blockCv.getContext('2d').drawImage(src, bx, by, cw, ch, 0, 0, cw, ch);
+        // 超分单块
+        const srBlock = await runSRBlock(session, blockCv);
+        // 拼接
+        octx.drawImage(srBlock, bx*2, by*2);
+        done++;
+        const pct = Math.round(done/total*100);
+        showStatus(`⏳ 超分中 ${pct}%`);
+      }
     }
-    octx.putImageData(imgData,0,0);
-    // 超分后增强：微对比度 + 强锐化（细节更清晰）
+    // 超分后增强：微对比度 + 强锐化
     const enh = outCanvas.getContext('2d');
     enh.filter = 'contrast(1.06)';
     enh.drawImage(outCanvas, 0, 0);
     enh.filter = 'none';
     sharpenUSM(outCanvas, 1.1);
-    // 更新底图 + 重新生成
     state.srcImage = outCanvas;
+    state.baseImage = null; state.seamlessDone = false;
     setupTabs();
     regenerate();
     showStatus(`✅ 超高清化完成 ${w}×${h} → ${ow}×${oh}（AI 细节增强）`);
@@ -530,6 +538,34 @@ async function superResolve() {
     console.error(e);
     showStatus('❌ 超分失败: ' + e.message);
   } finally { showLoader(false); }
+}
+async function runSRBlock(session, blockCv) {
+  const w = blockCv.width, h = blockCv.height;
+  const ctx = blockCv.getContext('2d');
+  const data = ctx.getImageData(0,0,w,h).data;
+  const input = new Float32Array(3*w*h);
+  for (let i=0;i<w*h;i++) {
+    input[i] = data[i*4]/255;
+    input[w*h+i] = data[i*4+1]/255;
+    input[2*w*h+i] = data[i*4+2]/255;
+  }
+  const feeds = {}; feeds[session.inputNames[0]] = new ort.Tensor('float32', input, [1,3,h,w]);
+  const results = await session.run(feeds);
+  const out = results[session.outputNames[0]];
+  const ow = w*2, oh = h*2;
+  const outCv = makeCanvas(ow,oh);
+  const octx = outCv.getContext('2d');
+  const imgData = octx.createImageData(ow,oh);
+  const od = out.data;
+  for (let y=0;y<oh;y++) for (let x=0;x<ow;x++) {
+    const i = (y*ow+x)*4, si = y*ow+x;
+    imgData.data[i]   = Math.max(0,Math.min(255, od[si]*255));
+    imgData.data[i+1] = Math.max(0,Math.min(255, od[ow*oh+si]*255));
+    imgData.data[i+2] = Math.max(0,Math.min(255, od[2*ow*oh+si]*255));
+    imgData.data[i+3] = 255;
+  }
+  octx.putImageData(imgData,0,0);
+  return outCv;
 }
 $('btnSR').addEventListener('click', superResolve);
 
