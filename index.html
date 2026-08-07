@@ -116,6 +116,7 @@ select:hover, .btn:hover { background:#e94560; }
     </div>
 
     <button class="btn btn-primary" id="btnGen" disabled>🛠️ 生成全套 PBR</button>
+    <button class="btn" id="btnSeamless" disabled>🔄 四方连续无缝（先点这个）</button>
     <button class="btn" id="btnSR" disabled>✨ 超高清化（AI 2x）</button>
     <div class="section-title">📦 导出设置</div>
     <div class="row">
@@ -167,8 +168,8 @@ select:hover, .btn:hover { background:#e94560; }
 <script>
 // ============ 状态 ============
 const state = {
-  srcImage: null, maps: {}, mapNames: [], currentMap: 'basecolor',
-  seamless: 80, normalStr: 100, roughStr: 100, aoStr: 100, metalVal: 0,
+  srcImage: null, baseImage: null, seamlessDone: false, maps: {}, mapNames: [], currentMap: 'basecolor',
+  seamless: 30, normalStr: 100, roughStr: 100, aoStr: 100, metalVal: 0,
   roughVal: 70, metalVal3d: 10, light: 120, tileMode: false,
   normalOn: true, preset: 'custom'
 };
@@ -199,7 +200,7 @@ function loadImage(file) {
   const reader = new FileReader();
   reader.onload = e => {
     const img = new Image();
-    img.onload = () => { state.srcImage = img; setupTabs(); $('btnGen').disabled=false; $('btnSR').disabled=false; showStatus(`照片已加载 ${img.width}×${img.height}，点击生成`); };
+    img.onload = () => { state.srcImage = img; state.baseImage = null; state.seamlessDone = false; setupTabs(); $('btnGen').disabled=false; $('btnSR').disabled=false; $('btnSeamless').disabled=false; showStatus(`照片已加载 ${img.width}×${img.height}`); };
     img.src = e.target.result;
   };
   reader.readAsDataURL(file);
@@ -247,7 +248,8 @@ bindSlider('slLight','light','vLight', v=>(v/100).toFixed(1));
 // ============ 贴图 Tab ============
 function setupTabs() {
   state.mapNames = ['原图','basecolor','normal','roughness','ao','height','metallic'];
-  const names = { '原图':'原图', basecolor:'BaseColor', normal:'法线', roughness:'粗糙度', ao:'AO', height:'高度', metallic:'金属度' };
+  if (state.seamlessDone) state.mapNames.splice(1, 0, 'seamless');
+  const names = { '原图':'原图', seamless:'无缝版', basecolor:'BaseColor', normal:'法线', roughness:'粗糙度', ao:'AO', height:'高度', metallic:'金属度' };
   $('mapTabs').innerHTML = '';
   state.mapNames.forEach(m => {
     const t = document.createElement('div');
@@ -272,12 +274,15 @@ function showMap(name) {
   if (name === '原图') {
     cv.width = state.srcImage.width; cv.height = state.srcImage.height;
     ctx.drawImage(state.srcImage, 0, 0);
+  } else if (name === 'seamless' && state.baseImage) {
+    cv.width = state.baseImage.width; cv.height = state.baseImage.height;
+    ctx.drawImage(state.baseImage, 0, 0);
   } else if (state.maps[name]) {
     cv.width = state.maps[name].width; cv.height = state.maps[name].height;
     ctx.drawImage(state.maps[name], 0, 0);
   }
   const info = $('preview-info');
-  if (info) info.textContent = name === '原图' ? `原图 ${state.srcImage.width}×${state.srcImage.height}` : (name==='basecolor'?'BaseColor':name);
+  if (info) info.textContent = name === '原图' ? `原图 ${state.srcImage.width}×${state.srcImage.height}` : (name==='seamless'?'无缝版':(name==='basecolor'?'BaseColor':name));
 }
 
 // ============ 核心：图像处理 ============
@@ -416,13 +421,11 @@ function genMetallic(w,h,val) {
 
 // ============ 生成 ============
 function regenerate() {
-  const img = state.srcImage; if (!img) return;
-  const W=img.width, H=img.height;
-  // 只有勾选"四方连续无缝"才做无缝处理，否则直接用原图（不改图）
-  const useSeamless = $('chkSeamless') && $('chkSeamless').checked;
-  const baseImg = useSeamless ? seamless(img, state.seamless) : img;
-  state.maps['basecolor'] = baseImg;
-  const sGray = toGray(baseImg).gray;
+  const base = state.baseImage || state.srcImage;   // 底图（默认原图，无缝后是无缝版）
+  if (!base) return;
+  const W=base.width, H=base.height;
+  state.maps['basecolor'] = base;
+  const sGray = toGray(base).gray;
   state.maps['normal'] = genNormal(sGray, W, H, state.normalStr);
   state.maps['height'] = genHeight(sGray, W, H);
   state.maps['ao'] = genAO(sGray, W, H, state.aoStr);
@@ -433,6 +436,20 @@ function regenerate() {
   showMap(state.currentMap);
   buildMatBalls();
 }
+// 独立无缝：先生成四方连续图，作为新底图，再基于它生成 PBR
+$('btnSeamless').addEventListener('click', () => {
+  if (!state.srcImage) return;
+  showLoader(true); showStatus('⏳ 生成四方连续无缝版...');
+  setTimeout(() => {
+    try {
+      state.baseImage = seamless(state.srcImage, state.seamless);
+      state.seamlessDone = true;
+      setupTabs();
+      regenerate();
+      showStatus('✅ 无缝版已生成，PBR 已基于无缝版重新生成');
+    } finally { showLoader(false); }
+  }, 30);
+});
 
 $('btnGen').addEventListener('click', () => {
   if (!state.srcImage) return;
