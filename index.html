@@ -56,6 +56,14 @@ select:hover, .btn:hover { background:#e94560; }
   <span>一张照片 → 全套 PBR · 真四方连续 · 3D 质检 · 8K 导出</span>
 </header>
 
+<!-- 首次使用引导横幅 -->
+<div id="guideBar" style="background:#0f3460;color:#ddd;padding:8px 20px;font-size:13px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #0f3460;flex-wrap:wrap">
+  <span style="color:#e94560;font-weight:bold">🎬 三步上手</span>
+  <span>1️⃣ 拖入照片 → 2️⃣ 点「四方连续无缝」（可选）→ 3️⃣ 「生成全套 PBR」看 3D 效果</span>
+  <span style="opacity:.7">导出记得勾选「DirectX 法线」（UE/Unity）和「ORM 合并」</span>
+  <button id="btnGuideClose" style="margin-left:auto;background:none;border:none;color:#e94560;cursor:pointer;font-size:16px;font-weight:bold" title="关闭提示">✕</button>
+</div>
+
 <main>
   <!-- 左：上传+参数 -->
   <div id="left">
@@ -89,6 +97,12 @@ select:hover, .btn:hover { background:#e94560; }
       <label><span>法线强度</span><span id="vNormal">100</span></label>
       <input type="range" id="slNormal" min="0" max="300" value="100">
     </div>
+    <div style="margin-top:8px;display:flex;align-items:center;gap:8px;background:#0f3460;padding:8px 10px;border-radius:8px;cursor:pointer" id="normalStyleBox">
+      <input type="checkbox" id="chkDirectX" checked style="accent-color:#e94560;width:16px;height:16px">
+      <label for="chkDirectX" style="font-size:13px;color:#eee;cursor:pointer;flex:1">DirectX 法线（UE/Unity 游戏引擎）</label>
+      <span style="font-size:11px;color:#e94560" id="chkDirectXState">✓ 已启用</span>
+    </div>
+    <div class="hint" style="text-align:left;padding:4px 2px">勾选 = UE/Unity 常用格式；取消 = Blender/Maya 常用。导出、3D预览同步。</div>
     <div class="slider-group">
       <label><span>粗糙度对比</span><span id="vRough">100</span></label>
       <input type="range" id="slRough" min="0" max="200" value="100">
@@ -133,6 +147,10 @@ select:hover, .btn:hover { background:#e94560; }
         <option value="webp">WebP</option>
       </select>
     </div>
+    <div style="margin-top:8px;display:flex;align-items:center;gap:8px;background:#0f3460;padding:8px 10px;border-radius:8px;cursor:pointer" id="ormBox">
+      <input type="checkbox" id="chkORM" style="accent-color:#e94560;width:16px;height:16px">
+      <label for="chkORM" style="font-size:13px;color:#eee;cursor:pointer;flex:1">合并 ORM 贴图（UE 通用：R=AO·G=粗糙度·B=金属度）</label>
+    </div>
     <button class="btn" id="btnExport" disabled>📦 导出 ZIP</button>
   </div>
 
@@ -171,7 +189,7 @@ const state = {
   srcImage: null, baseImage: null, seamlessDone: false, maps: {}, mapNames: [], currentMap: 'basecolor',
   seamless: 30, normalStr: 100, roughStr: 100, aoStr: 100, metalVal: 0,
   roughVal: 70, metalVal3d: 10, light: 120, tileMode: false,
-  normalOn: true, preset: 'custom'
+  normalOn: true, preset: 'custom', directX: true
 };
 
 // 材质预设
@@ -188,6 +206,13 @@ const PRESET_NAMES = { custom:'自定义', stone:'石材', wood:'木材', tile:'
 // ============ DOM ============
 const $ = id => document.getElementById(id);
 const dropZone = $('dropZone'), fileInput = $('fileInput');
+
+// 首次使用引导（关闭后记住，不再显示）
+(function(){
+  const bar = $('guideBar'); if (!bar) return;
+  if (localStorage.getItem('pbrGuideClosed') === '1') { bar.style.display = 'none'; }
+  $('btnGuideClose').addEventListener('click', () => { bar.style.display = 'none'; localStorage.setItem('pbrGuideClosed', '1'); });
+})();
 
 // ============ 上传 ============
 dropZone.addEventListener('click', () => fileInput.click());
@@ -254,6 +279,20 @@ bindSlider('slMetal','metalVal','vMetal', null, ['metallic']);
 bindSlider('slRoughVal','roughVal','vRoughVal', v=>(v/100).toFixed(2));
 bindSlider('slMetalVal','metalVal3d','vMetalVal', v=>(v/100).toFixed(2));
 bindSlider('slLight','light','vLight', v=>(v/100).toFixed(1));
+
+// DirectX / OpenGL 法线风格开关（UE/Unity = DirectX，Blender/Maya = OpenGL）
+$('normalStyleBox').addEventListener('click', () => { $('chkDirectX').checked = !$('chkDirectX').checked; applyNormalStyle(); });
+$('chkDirectX').addEventListener('change', applyNormalStyle);
+function applyNormalStyle() {
+  state.directX = $('chkDirectX').checked;
+  const st = $('chkDirectXState');
+  if (st) { st.textContent = state.directX ? '✓ 已启用' : '当前 OpenGL'; st.style.color = state.directX ? '#e94560' : '#aaa'; }
+  if (!state.srcImage) return;
+  // 法线贴图需要按新风格重新生成（原尺寸精确）
+  regenerate(false, ['normal']);
+  if (state.normalOn && renderer) buildMesh();
+  showStatus(state.directX ? '✅ DirectX 法线（UE/Unity 格式）已启用' : 'OpenGL 法线（Blender/Maya 格式）已启用');
+}
 
 // ============ 贴图 Tab ============
 function setupTabs() {
@@ -346,18 +385,19 @@ function seamless(img, strength) {
   return out;
 }
 
-// 高质量法线：Sobel + 可选增强
-function genNormal(g, w, h, strength) {
+// 高质量法线：Sobel + 可选增强。DirectX/OpenGL 开关（GM 反转，绿通道翻转）
+function genNormal(g, w, h, strength, directX) {
   const out = makeCanvas(w,h), ctx = out.getContext('2d');
   const img = ctx.createImageData(w,h);
   const s = strength/100 * 2.5;
+  const gySign = directX ? -1 : 1;   // DirectX 绿通道取反
   for (let y=1;y<h-1;y++) for (let x=1;x<w-1;x++) {
     const i=y*w+x;
     const tl=g[i-w-1],t=g[i-w],tr=g[i-w+1],l=g[i-1],r=g[i+1],bl=g[i+w-1],b=g[i+w],br=g[i+w+1];
     // 增强 Sobel（对角加权）
     const gx = (tr+2*r+br) - (tl+2*l+bl) + (tr-tl+br-bl)*0.3;
     const gy = (bl+2*b+br) - (tl+2*t+tr) + (bl-tl+br-tr)*0.3;
-    const nx=-gx*s, ny=-gy*s, nz=255;
+    const nx=-gx*s, ny=-gy*s*gySign, nz=255;
     const len=Math.sqrt(nx*nx+ny*ny+nz*nz)||1;
     const o=i*4;
     img.data[o]=((nx/len)*0.5+0.5)*255;
@@ -388,19 +428,33 @@ function genAO(g, w, h, strength) {
   return out;
 }
 // 可分离盒模糊（数学等价 O(R²)→O(R)，R=9 快 19 倍，画质零损失）
+// 环绕索引取模实现无缝平铺（AO 无接缝）；下标一律用 ((x)%n+n)%n 保证非负
 function boxBlur1D(arr, w, h, R, horiz) {
   const len = w*h, out = new Float32Array(len);
-  const dim = horiz ? w : h, stride = horiz ? 1 : w;
-  const wrap = horiz ? (o,k)=>((o%w)+k+(k<0?(o%w)>=w?0:w:0))%w : (o,k)=>((Math.floor(o/w)+k)%h+h)%h;
-  for (let major=0; major < (horiz ? h : w); major++) {
-    const base = horiz ? major*w : major;
-    let sum = 0;
-    for (let d=-R; d<=R; d++) sum += g[horiz ? base+wrap(base,d) : wrap(base,d)*w + major];
-    for (let d=0; d<dim; d++) {
-      const idx = horiz ? base+d : d*w + major;
-      out[idx] = sum / (2*R+1);
-      sum -= g[horiz ? base+wrap(idx,-R) : wrap(idx,-R)*w + major];
-      sum += g[horiz ? base+wrap(idx,R+1) : wrap(idx,R+1)*w + major];
+  if (horiz) {
+    for (let y=0; y<h; y++) {
+      const base = y*w;
+      let sum = 0;
+      for (let d=-R; d<=R; d++) sum += arr[base + ((d%w)+w)%w];
+      for (let x=0; x<w; x++) {
+        out[base+x] = sum / (2*R+1);
+        const outIdx = base + ((x-R)%w+w)%w;   // 滑出
+        const inIdx  = base + ((x+R+1)%w+w)%w; // 滑入
+        sum -= arr[outIdx];
+        sum += arr[inIdx];
+      }
+    }
+  } else {
+    for (let x=0; x<w; x++) {
+      let sum = 0;
+      for (let d=-R; d<=R; d++) sum += arr[(((d%h)+h)%h)*w + x];
+      for (let y=0; y<h; y++) {
+        out[y*w+x] = sum / (2*R+1);
+        const outIdx = (((y-R)%h+h)%h)*w + x;
+        const inIdx  = (((y+R+1)%h+h)%h)*w + x;
+        sum -= arr[outIdx];
+        sum += arr[inIdx];
+      }
     }
   }
   return out;
@@ -422,19 +476,48 @@ function genAOLevel(g, w, h, R, strength) {
 }
 
 // 粗糙度：局部标准差 + 亮度反向
+// 用可分离滑动窗口求局部 sum/sum2（两步各 O(R)，代替暴力 R²=25 次/像素，快约 5 倍，结果一致）
+function separableWindowSum2(g, w, h, R) {
+  const n = w*h;
+  const rowSum = new Float32Array(n), rowSum2 = new Float32Array(n);
+  const colSum = new Float32Array(n), colSum2 = new Float32Array(n);
+  // 1) 水平：每行滑窗
+  for (let y=0; y<h; y++) {
+    const base = y*w;
+    let s=0, s2=0;
+    for (let x=-R; x<=R; x++) { const v=g[base+((x%w)+w)%w]; s+=v; s2+=v*v; }
+    for (let x=0; x<w; x++) {
+      rowSum[base+x]=s; rowSum2[base+x]=s2;
+      const outV=g[base+((x-R)%w+w)%w], inV=g[base+((x+R+1)%w+w)%w];
+      s+=-outV+inV; s2+=-outV*outV+inV*inV;
+    }
+  }
+  // 2) 垂直：对每列再对 rowSum/rowSum2 滑窗
+  for (let x=0; x<w; x++) {
+    let s=0, s2=0;
+    for (let y=-R; y<=R; y++) { const idx=(((y%h)+h)%h)*w+x; s+=rowSum[idx]; s2+=rowSum2[idx]; }
+    for (let y=0; y<h; y++) {
+      colSum[y*w+x]=s; colSum2[y*w+x]=s2;
+      const outIdx=(((y-R)%h+h)%h)*w+x, inIdx=(((y+R+1)%h+h)%h)*w+x;
+      s+=-rowSum[outIdx]+rowSum[inIdx]; s2+=-rowSum2[outIdx]+rowSum2[inIdx];
+    }
+  }
+  return { sum: colSum, sum2: colSum2 };
+}
 function genRoughness(g, w, h, strength) {
   const out = makeCanvas(w,h), ctx = out.getContext('2d');
   const img = ctx.createImageData(w,h);
   const R=2, s=strength/100;
   let mn=255,mx=0; for(let i=0;i<g.length;i++){mn=Math.min(mn,g[i]);mx=Math.max(mx,g[i]);}
   const range=(mx-mn)||1;
+  const K = (2*R+1)*(2*R+1);
+  const { sum, sum2 } = separableWindowSum2(g, w, h, R);
   for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
-    let sum=0,sum2=0,cnt=0;
-    for (let dy=-R;dy<=R;dy++) for (let dx=-R;dx<=R;dx++) { const nx=(x+dx+w)%w,ny=(y+dy+h)%h,v=g[ny*w+nx]; sum+=v;sum2+=v*v;cnt++; }
-    const mean=sum/cnt, std=Math.sqrt(Math.max(0,sum2/cnt-mean*mean));
-    const bright=(g[y*w+x]-mn)/range;
+    const i=y*w+x;
+    const mean=sum[i]/K, std=Math.sqrt(Math.max(0,sum2[i]/K-mean*mean));
+    const bright=(g[i]-mn)/range;
     const v=Math.max(0,Math.min(255, (std*3.2+(1-bright)*42)*s));
-    const o=(y*w+x)*4;
+    const o=i*4;
     img.data[o]=v; img.data[o+1]=v; img.data[o+2]=v; img.data[o+3]=255;
   }
   ctx.putImageData(img,0,0);
@@ -471,7 +554,7 @@ function regenerate(preview, onlyMaps) {
   if (needAll && canReuseGray) { grayArr = state.sGray; } else { grayArr = toGray(src).gray; if (needAll) { state.sGray = grayArr; state.sGrayW = base.width; state.sGrayH = base.height; } }
   const doMap = m => !onlyMaps || onlyMaps === 'all' || onlyMaps.has(m);
   if (doMap('basecolor')) state.maps['basecolor'] = src;
-  if (doMap('normal')) state.maps['normal'] = genNormal(grayArr, W, H, state.normalStr);
+  if (doMap('normal')) state.maps['normal'] = genNormal(grayArr, W, H, state.normalStr, state.directX);
   if (doMap('height')) state.maps['height'] = genHeight(grayArr, W, H);
   if (doMap('ao')) state.maps['ao'] = genAO(grayArr, W, H, state.aoStr);
   if (doMap('roughness')) state.maps['roughness'] = genRoughness(grayArr, W, H, state.roughStr);
@@ -608,8 +691,45 @@ $('btnSR').addEventListener('click', superResolve);
 function showLoader(v) { $('loader').style.display = v ? 'flex' : 'none'; }
 
 // ============ 导出 ============
+// ORM 合并：R=AO · G=Roughness · B=Metallic（UE 标准打包，省纹理、省显存）
+function mergeORM(size) {
+  const sizeKey = size && size !== 0 ? size : null;
+  const getM = k => {
+    if (!state.maps[k]) return null;
+    if (sizeKey && (state.maps[k].width !== sizeKey || state.maps[k].height !== sizeKey))
+      return highQualityResize(state.maps[k], sizeKey, sizeKey);
+    return state.maps[k];
+  };
+  const ao = getM('ao'), rough = getM('roughness'), metal = getM('metallic');
+  if (!ao && !rough && !metal) return null;
+  const w = (ao||rough||metal).width, h = (ao||rough||metal).height;
+  const out = makeCanvas(w,h), ctx = out.getContext('2d');
+  const img = ctx.createImageData(w,h);
+  // 辅助：读某图的 R 通道（AO/Rough/Metal 都是灰度，任取一通道即可）
+  // 若图尺寸与目标不同（例如原图未缩放），先拉到目标尺寸再读，保证三张对齐
+  const chan = cv => {
+    let t = cv;
+    if (cv.width !== w || cv.height !== h) { t = highQualityResize(cv, w, h); }
+    const d = t.getContext('2d').getImageData(0,0,w,h).data;
+    const a = new Uint8Array(w*h);
+    for (let i=0;i<w*h;i++) a[i]=d[i*4];
+    return a;
+  };
+  const rA = ao ? chan(ao) : new Uint8Array(w*h).fill(255);
+  const gR = rough ? chan(rough) : new Uint8Array(w*h).fill(128);
+  const bM = metal ? chan(metal) : new Uint8Array(w*h).fill(0);
+  for (let i=0;i<w*h;i++) {
+    img.data[i*4] = rA[i];
+    img.data[i*4+1] = gR[i];
+    img.data[i*4+2] = bM[i];
+    img.data[i*4+3] = 255;
+  }
+  ctx.putImageData(img,0,0);
+  return out;
+}
 $('btnExport').addEventListener('click', () => {
   const size = +$('selSize').value, format = $('selFormat').value;
+  const combineORM = $('chkORM').checked;
   const zip = new JSZip();
   const n = 'texture';
   const names = { basecolor:'BaseColor', normal:'Normal', roughness:'Roughness', ao:'AO', height:'Height', metallic:'Metallic' };
@@ -618,12 +738,20 @@ $('btnExport').addEventListener('click', () => {
     const data = exportImage(state.maps[m], size, format);
     zip.file(`${n}_${names[m]||m}.${format}`, data, {binary:true});
   });
+  // 若勾选 ORM：额外生成一张合并贴图（UE 材质里 ORM 一张搞定）
+  if (combineORM) {
+    const ormCanvas = mergeORM(size);
+    if (ormCanvas) {
+      const ormData = exportImage(ormCanvas, 0, format);
+      zip.file(`${n}_ORM.${format}`, ormData, {binary:true});
+    }
+  }
   zip.generateAsync({type:'blob'}).then(blob => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `PBR_Material_${size||'full'}.zip`;
+    a.download = `PBR_Material_${size||'full'}${combineORM?'_withORM':''}.zip`;
     a.click();
-    showStatus('✅ ZIP 已导出');
+    showStatus(combineORM ? '✅ ZIP 已导出（含 ORM 合并贴图）' : '✅ ZIP 已导出');
   });
 });
 function exportImage(cv, size, format) {
