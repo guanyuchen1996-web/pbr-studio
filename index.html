@@ -200,7 +200,7 @@ function loadImage(file) {
   const reader = new FileReader();
   reader.onload = e => {
     const img = new Image();
-    img.onload = () => { state.srcImage = img; state.baseImage = null; state.seamlessDone = false; setupTabs(); $('btnGen').disabled=false; $('btnSR').disabled=false; $('btnSeamless').disabled=false; showStatus(`照片已加载 ${img.width}×${img.height}`); };
+    img.onload = () => { state.srcImage = img; state.baseImage = null; state.sGray = null; state.sPreviewCache = null; state.seamlessDone = false; setupTabs(); $('btnGen').disabled=false; $('btnSR').disabled=false; $('btnSeamless').disabled=false; showStatus(`照片已加载 ${img.width}×${img.height}`); };
     img.src = e.target.result;
   };
   reader.readAsDataURL(file);
@@ -219,29 +219,38 @@ $('presetSelect').addEventListener('change', () => {
   $('slRoughVal').value = p.roughVal; state.roughVal = p.roughVal; $('vRoughVal').textContent = (p.roughVal/100).toFixed(2);
   $('slMetalVal').value = p.metalVal; state.metalVal3d = p.metalVal; $('vMetalVal').textContent = (p.metalVal/100).toFixed(2);
   $('slLight').value = p.light; state.light = p.light; $('vLight').textContent = (p.light/100).toFixed(1);
-  if (state.srcImage) { debouncedRegen(); }
+  if (state.srcImage) { debouncedRegen(); /* 预设→全量 */ }
 });
 
 // ============ 滑块（拖动小预览，松手全尺寸）============
-let debounceTimer, fullTimer;
-function debouncedRegen() {
+let debounceTimer, fullTimer, pendingMaps = null;
+function debouncedRegen(onlyMaps) {
+  if (onlyMaps) {
+    if (!pendingMaps) pendingMaps = new Set();
+    onlyMaps.forEach(m => pendingMaps.add(m));
+  } else {
+    pendingMaps = null;
+  }
   clearTimeout(fullTimer);
-  regenerate(true);                        // 立即小尺寸预览（流畅）
-  fullTimer = setTimeout(() => regenerate(false), 800);  // 停止 800ms 后全尺寸精确
+  regenerate(true, pendingMaps);
+  fullTimer = setTimeout(() => {
+    const maps = pendingMaps; pendingMaps = null;
+    regenerate(false, maps);
+  }, 1200);  // 停止 1.2s 后全尺寸精确
 }
-function bindSlider(id, key, vid, fmt) {
+function bindSlider(id, key, vid, fmt, maps) {
   $(id).addEventListener('input', () => {
     state[key] = +$(id).value;
     $(vid).textContent = fmt ? fmt(state[key]) : $(id).value;
-    if (state.srcImage) debouncedRegen();
-    if (key==='roughVal'||key==='metalVal3d'||key==='light') updateMaterial();
+    if (key==='roughVal'||key==='metalVal3d'||key==='light') { updateMaterial(); return; }
+    if (state.srcImage) debouncedRegen(maps);
   });
 }
-bindSlider('slSeamless','seamless','vSeamless');
-bindSlider('slNormal','normalStr','vNormal');
-bindSlider('slRough','roughStr','vRough');
-bindSlider('slAO','aoStr','vAO');
-bindSlider('slMetal','metalVal','vMetal');
+bindSlider('slSeamless','seamless','vSeamless');  // 无缝→全部重算
+bindSlider('slNormal','normalStr','vNormal', null, ['normal']);
+bindSlider('slRough','roughStr','vRough', null, ['roughness']);
+bindSlider('slAO','aoStr','vAO', null, ['ao']);
+bindSlider('slMetal','metalVal','vMetal', null, ['metallic']);
 bindSlider('slRoughVal','roughVal','vRoughVal', v=>(v/100).toFixed(2));
 bindSlider('slMetalVal','metalVal3d','vMetalVal', v=>(v/100).toFixed(2));
 bindSlider('slLight','light','vLight', v=>(v/100).toFixed(1));
@@ -378,14 +387,32 @@ function genAO(g, w, h, strength) {
   ctx.drawImage(large,0,0);
   return out;
 }
+// 可分离盒模糊（数学等价 O(R²)→O(R)，R=9 快 19 倍，画质零损失）
+function boxBlur1D(arr, w, h, R, horiz) {
+  const len = w*h, out = new Float32Array(len);
+  const dim = horiz ? w : h, stride = horiz ? 1 : w;
+  const wrap = horiz ? (o,k)=>((o%w)+k+(k<0?(o%w)>=w?0:w:0))%w : (o,k)=>((Math.floor(o/w)+k)%h+h)%h;
+  for (let major=0; major < (horiz ? h : w); major++) {
+    const base = horiz ? major*w : major;
+    let sum = 0;
+    for (let d=-R; d<=R; d++) sum += g[horiz ? base+wrap(base,d) : wrap(base,d)*w + major];
+    for (let d=0; d<dim; d++) {
+      const idx = horiz ? base+d : d*w + major;
+      out[idx] = sum / (2*R+1);
+      sum -= g[horiz ? base+wrap(idx,-R) : wrap(idx,-R)*w + major];
+      sum += g[horiz ? base+wrap(idx,R+1) : wrap(idx,R+1)*w + major];
+    }
+  }
+  return out;
+}
 function genAOLevel(g, w, h, R, strength) {
   const out = makeCanvas(w,h), ctx = out.getContext('2d');
   const img = ctx.createImageData(w,h);
   const s = strength/100;
+  const hPass = boxBlur1D(g, w, h, R, true);
+  const vPass = boxBlur1D(hPass, w, h, R, false);
   for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
-    let sum=0,cnt=0;
-    for (let dy=-R;dy<=R;dy++) for (let dx=-R;dx<=R;dx++) { const nx=(x+dx+w)%w, ny=(y+dy+h)%h; sum+=g[ny*w+nx]; cnt++; }
-    const avg=sum/cnt;
+    const avg = vPass[y*w+x];
     const v=Math.max(0,Math.min(255, avg + (g[y*w+x]-avg)*s*0.7));
     const o=(y*w+x)*4;
     img.data[o]=v; img.data[o+1]=v; img.data[o+2]=v; img.data[o+3]=255;
@@ -421,25 +448,34 @@ function genMetallic(w,h,val) {
 }
 
 // ============ 生成（支持预览模式：小尺寸快速，松手全尺寸）============
-function regenerate(preview) {
+function regenerate(preview, onlyMaps) {
   const base = state.baseImage || state.srcImage;
   if (!base) return;
   // 预览模式：缩小到 512px 快速计算（毫秒级，拖动流畅）
   const scale = preview ? Math.min(1, 512/Math.max(base.width, base.height)) : 1;
-  let src = base;
-  if (scale < 1) {
+  let src = base, W, H;
+  const canReuseGray = !preview && state.sGray && state.sGrayW === base.width && state.sGrayH === base.height;
+  if (scale < 1 && !(preview && state.sPreviewCache)) {
+    // 小预览缓存，滑条拖动只重算一次缩图（非全尺寸）
     src = makeCanvas(Math.floor(base.width*scale), Math.floor(base.height*scale));
     const sc = src.getContext('2d'); sc.imageSmoothingEnabled=true; sc.imageSmoothingQuality='high';
     sc.drawImage(base, 0, 0, src.width, src.height);
+    if (preview) state.sPreviewCache = src;
+  } else if (preview && state.sPreviewCache) {
+    src = state.sPreviewCache;
   }
-  const W=src.width, H=src.height;
-  state.maps['basecolor'] = src;
-  const sGray = toGray(src).gray;
-  state.maps['normal'] = genNormal(sGray, W, H, state.normalStr);
-  state.maps['height'] = genHeight(sGray, W, H);
-  state.maps['ao'] = genAO(sGray, W, H, state.aoStr);
-  state.maps['roughness'] = genRoughness(sGray, W, H, state.roughStr);
-  state.maps['metallic'] = genMetallic(W, H, Math.round(state.metalVal*255/100));
+  W=src.width; H=src.height;
+  // grayscale 延迟/复用：只在需要全量或没缓存时计算
+  let grayArr;
+  const needAll = !onlyMaps || onlyMaps === 'all';
+  if (needAll && canReuseGray) { grayArr = state.sGray; } else { grayArr = toGray(src).gray; if (needAll) { state.sGray = grayArr; state.sGrayW = base.width; state.sGrayH = base.height; } }
+  const doMap = m => !onlyMaps || onlyMaps === 'all' || onlyMaps.has(m);
+  if (doMap('basecolor')) state.maps['basecolor'] = src;
+  if (doMap('normal')) state.maps['normal'] = genNormal(grayArr, W, H, state.normalStr);
+  if (doMap('height')) state.maps['height'] = genHeight(grayArr, W, H);
+  if (doMap('ao')) state.maps['ao'] = genAO(grayArr, W, H, state.aoStr);
+  if (doMap('roughness')) state.maps['roughness'] = genRoughness(grayArr, W, H, state.roughStr);
+  if (doMap('metallic')) state.maps['metallic'] = genMetallic(W, H, Math.round(state.metalVal*255/100));
   $('btnExport').disabled = false;
   // 全尺寸模式才更新 3D（预览模式只刷贴图，快）
   if (!preview) {
